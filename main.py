@@ -6,6 +6,14 @@ from subprocess import PIPE, Popen
 from datetime import datetime
 import concurrent.futures
 import requests
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(level=logging.INFO)
+file_handler = logging.FileHandler('main.log')
+formatter = logging.Formatter('%(asctime)s :: %(levelname)s :: %(funcName)s :: %(message)s')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
 
 def cmdline(command):
     process = Popen(
@@ -18,18 +26,20 @@ def cmdline(command):
     return exitcode
 
 def masscan(target_file, rate, exclude):
-    # masscan not installed
+    # 检测是否安装了 masscan
     if cmdline('which masscan') != 0:
-        print('masscan not found')
+        logger.error('没有安装 masscan')
         exit(1)
+    if os.path.exists('paused.conf'):
+        # 检测是否有 paused.conf 文件, 如果有, 则删除
+        os.remove('paused.conf')
     start_time = time.time()
-    # excute the scan and save result to json file
+    # 暂存 masscan 结果到 scan_result.json
+    logger.info(f'开始 masscan 扫描: sudo masscan -iL {target_file} -p1-65535 --rate {rate} --exclude={exclude}  -oJ scan_result.json')
     flag = cmdline(f'sudo masscan -iL {target_file} -p1-65535 --rate {rate} --exclude={exclude}  -oJ scan_result.json')
     end_time = time.time()
     scan_used_time = end_time - start_time
-    # print(f'masscan used time: {scan_used_time}')
-    # print time cost human readable
-    print(f'masscan used time: {time.strftime("%H:%M:%S", time.gmtime(scan_used_time))}')
+    logger.info(f'masscan 耗时: {time.strftime("%H:%M:%S", time.gmtime(scan_used_time))}')
     if flag == 0:
         # if exist scan_result.json
         if os.path.exists('scan_result.json'):
@@ -40,21 +50,17 @@ def masscan(target_file, rate, exclude):
         else:
             return []
     else:
+        logger.error('masscan 扫描失败, exit code: %s' % flag)
         return []
 
 def parse_masscan_json(data):
     if data:
-        start_time = time.time()
         open_ports = []
         for i in data:
             if i['ports'][0]['status'] == 'open':
                 timestamp = int(i['timestamp'])
                 dt_object = datetime.fromtimestamp(timestamp)
                 open_ports.append({'ip': i['ip'], 'port': str(i['ports'][0]['port']), 'time': str(dt_object)})
-        end_time = time.time()
-        parse_used_time = end_time - start_time
-        # print(f'masscan result parse used time: {parse_used_time}')
-        print(f'masscan result parse used time: {time.strftime("%H:%M:%S", time.gmtime(parse_used_time))}')
         return open_ports
     else:
         return []
@@ -62,43 +68,42 @@ def parse_masscan_json(data):
 def parse_masscan_json_by_ip(masscan_filtered):
      if masscan_filtered:
         ip_ports = []
-        # get open port of a unique ip in masscan_filtered
+        # 将 masscan 扫描结果按 ip 分组
         for i in masscan_filtered:
             ip = i['ip']
-            # get unique ip's open ports
+            # 某个 ip 的所有端口
             ports = [j['port'] for j in masscan_filtered if j['ip'] == ip]
-            # get unique ip's open ports and scan it
             ip_ports.append({"ip": ip, "ports": ports})
-        # remove duplicate ip
+        # 操作完后可能会有重复的 ip, 去重
         ip_ports = list({v['ip']:v for v in ip_ports}.values())
         return ip_ports
 
 def filter_by_whitelist(scan_result, whitelist_file='whitelist.json'):
     if scan_result:
-        start_time = time.time()
+        logger.info(f'开始过滤白名单, 共有 {len(scan_result)} 条结果')
         if os.path.exists(whitelist_file):
             with open(whitelist_file, 'r') as f:
                 whitelist = json.load(f)
-            # print(whitelist)
+            logger.info(f'开始过滤白名单, 白名单中共有 {len(whitelist)} 条规则')
         else:
+            logger.error('没有白名单文件')
             whitelist = []
         for i in scan_result:
-            # compare ip and port with whitelist
             for j in whitelist:
                 if i['ip'] == j['ip'] and i['port'] == j['port']:
+                    logger.debug(f'过滤白名单: {i["ip"]}:{i["port"]}')
                     scan_result.remove(i)
-        end_time = time.time()
-        filter_used_time = end_time - start_time
-        # print(f'filter used time: {filter_used_time}')
-        print(f'whitelist filter used time: {time.strftime("%H:%M:%S", time.gmtime(filter_used_time))}')
+        logger.info(f'过滤白名单后, 剩余 {len(scan_result)} 条结果')
         return scan_result
     else:
+        logger.error('没有扫描结果, 无法过滤白名单')
         return []
 
 
 def nmap_scan(ip, port):
     nmap_filterd_ports = []
     try:
+        logger.info(f'开始 nmap 扫描: {ip}:{port}')
         start_time = time.time()
         nm = nmap.PortScanner()
         nm.scan(ip, port)
@@ -107,36 +112,24 @@ def nmap_scan(ip, port):
         nmap_filterd_ports.append({"ip": ip, "port": port, "state": state, "name": service_name})
         end_time = time.time()
         nmap_used_time = end_time - start_time
-        print(f'nmap scan used time: {time.strftime("%H:%M:%S", time.gmtime(nmap_used_time))} for {ip}:{port}')
+        logger.info(f'扫描结果: {ip}:{port} {state} {service_name} 用时: {time.strftime("%H:%M:%S", time.gmtime(nmap_used_time))}')
         return nmap_filterd_ports
     except Exception as e:
-        print(e)
+        logger.error(f'nmap 扫描失败: {ip}:{port}')
 
 def concurrent_namp_scan(masscan_filtered):
     if masscan_filtered:
         scan_result = concurrent.futures.ThreadPoolExecutor(max_workers=1000).map(nmap_scan, [i['ip'] for i in masscan_filtered], [i['port'] for i in masscan_filtered])
-        return list(scan_result)
+        scan_result = list(scan_result)
+        # repackage 
+        scan_result = [i[0] for i in scan_result if i]
+        return scan_result
     else:
         return []
 
-def calc_scan_accuracy(scan_result, whitelist_file='whitelist.json'):
-    # calc masscan scan accuracy
-    if scan_result:
-        if os.path.exists(whitelist_file):
-            with open(whitelist_file, 'r') as f:
-                whitelist = json.load(f)
-        else:
-            whitelist = []
-        # print(whitelist)
-        scan_result_len = len(scan_result)
-        whitelist_len = len(whitelist)
-        accuracy = 1 - scan_result_len / whitelist_len
-        print(f'masscan scan accuracy: {accuracy}')
-        return accuracy
-    pass
-
 def trigger_webhook(type, data):
     if type == 'feishu':
+        logger.info('触发飞书 webhook')
         # feishu webhook
         webhook = 'https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx'
         # feishu webhook header
@@ -169,19 +162,74 @@ def trigger_webhook(type, data):
         # trigger tt webhook
         res = requests.post(webhook, headers=headers, data=json.dumps(data))
 
-    pass
+
+
+def calc_masscan_accuaracy(masscan_result, whitelist_file='whitelist.json'):
+    if len(masscan_result) == 0:
+        logger.error('没有扫描结果, 无法计算准确率')
+        return 0
+    if os.path.exists(whitelist_file):
+        with open(whitelist_file, 'r') as f:
+            whitelist = json.load(f)
+        # 计算准确率
+        for i in masscan_result:
+            for j in whitelist:
+                if i['ip'] == j['ip'] and i['port'] == j['port']:
+                    whitelist.remove(j)
+        accuracy = 1 - len(whitelist) / len(masscan_result)
+        return round(number=accuracy, ndigits=2)
+    else:
+        logger.error('白名单文件不存在, 无法计算准确率')
+        return 1
+
+def save_scan_result(scan_result=[]):
+    if scan_result:
+        # 保存结果到文件
+        with open('scan_result.json', 'w') as f:
+            json.dump(scan_result, f, indent=2)
+        logger.info('保存扫描结果成功')
+    else:
+        logger.error('没有扫描结果, 无法保存')
+
+def diff_alert(new_scan_result):
+    if new_scan_result:
+        if os.path.exists('scan_result.json'):
+            with open('scan_result.json', 'r') as f:
+                old_scan_result = json.load(f)
+            logger.info(f'旧的扫描结果: {old_scan_result}')
+            logger.info(f'新的扫描结果: {new_scan_result}')
+            # 计算差异
+            # 增加的端口
+            add_ip_port = [i for i in new_scan_result if i not in old_scan_result]
+            # TODO 见鬼了, 为什么这里会有重复的端口
+            del_ip_port = [i for i in old_scan_result if i not in new_scan_result]
+            if add_ip_port or del_ip_port:
+                logger.info('发现差异, 触发告警')
+                logger.info(f'增加的端口: {add_ip_port}')
+                logger.info(f'减少的端口: {del_ip_port}')
+            else:
+                logger.info('没有差异, 不触发告警')
+    else:
+        logger.error('没有扫描结果, 无法进行差异告警')
 
 if __name__ == '__main__':
-    print('start scan, please wait...')
-    # masscan scan
+    logger.info('开始端口扫描')
+    # 1. masscan 扫描
     masscan_result = masscan(target_file='target.txt', rate=5000, exclude='10.0.0.0/8')
-    # parse masscan result
+    # 2. 过滤 masscan 结果为需要的格式
     masscan_filtered = parse_masscan_json(masscan_result)
-    # filter by whitelist
+    # 3. 在这一步计算准确率
+    accuarcy = calc_masscan_accuaracy(masscan_filtered)
+    logger.info(f'准确率: {accuarcy * 100}%')
+    # 4. 过滤白名单
     masscan_filtered = filter_by_whitelist(masscan_filtered, whitelist_file='whitelist.json')
-    # nmap scan
-    scan_result = concurrent_namp_scan(masscan_filtered)
-    print(scan_result)
-    # # save scan result to json file
-    # with open('scan_result.json', 'w') as f:
-    #     json.dump(scan_result, f)
+    # 5. nmap 再次扫描
+    # 表示不在白名单中的端口信息
+    nmap_scan_result = concurrent_namp_scan(masscan_filtered)
+    # 6. 和上次的结果比较并进行告警
+    # TODO
+    diff_alert(nmap_scan_result)
+
+    # 7. 保存本次扫描结果到文件
+    save_scan_result(nmap_scan_result)
+
