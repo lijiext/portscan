@@ -45,8 +45,8 @@ def masscan(target_file, rate, exclude):
         if os.path.exists('scan_result.json'):
             with open('scan_result.json', 'r') as f:
                 data = json.load(f)
+                os.remove('scan_result.json')
                 return data
-            os.remove('scan_result.json')
         else:
             return []
     else:
@@ -185,7 +185,7 @@ def calc_masscan_accuaracy(masscan_result, whitelist_file='whitelist.json'):
 def save_scan_result(scan_result=[]):
     if scan_result:
         # 保存结果到文件
-        with open('scan_result.json', 'w') as f:
+        with open('result.json', 'w') as f:
             json.dump(scan_result, f, indent=2)
         logger.info('保存扫描结果成功')
     else:
@@ -193,8 +193,8 @@ def save_scan_result(scan_result=[]):
 
 def diff_alert(new_scan_result):
     if new_scan_result:
-        if os.path.exists('scan_result.json'):
-            with open('scan_result.json', 'r') as f:
+        if os.path.exists('result.json'):
+            with open('result.json', 'r') as f:
                 old_scan_result = json.load(f)
             logger.info(f'旧的扫描结果: {old_scan_result}')
             logger.info(f'新的扫描结果: {new_scan_result}')
